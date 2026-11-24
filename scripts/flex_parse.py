@@ -51,6 +51,10 @@ def _execution(el):
         "fx": fx,
         "quantity": number(el.get("quantity")),
         "price": number(el.get("tradePrice")),
+        "proceeds": number(el.get("proceeds")),
+        "commission": number(el.get("ibCommission")),
+        "commission_currency": el.get("ibCommissionCurrency") or el.get("currency", ""),
+        "units": net,
         "net": net * fx,
         "open_close": el.get("openCloseIndicator", ""),
         "codes": _codes(el.get("notes")),
@@ -152,6 +156,8 @@ def parse_files(paths, account=None):
         fx = row["fx"]
         if fx is None:
             fx = 1.0 if row["currency"] in ("", base_currency) else _nearest_rate(rates, row["currency"], row["date"])
+        row["fx"] = fx
+        row["units"] = row["amount"]
         if fx is None:
             unconverted += 1
             fx = 1.0

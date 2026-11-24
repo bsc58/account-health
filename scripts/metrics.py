@@ -17,7 +17,54 @@ def rnd(value, digits=4):
     return round(float(value), digits) + 0.0
 
 
-def _place_flows(parsed, dates, cash, cfg):
+def _fx_pnl(parsed, dates, values, cfg):
+    base = parsed["base_currency"]
+    n = len(dates)
+    moves = {}
+    booked = {}
+    rates = {}
+
+    def post(currency, day, units, rate=None, recorded=0.0):
+        i = bisect.bisect_left(dates, day)
+        if i >= n:
+            return
+        moves.setdefault(currency, [0.0] * n)[i] += units
+        booked.setdefault(currency, [0.0] * n)[i] += recorded
+        if rate:
+            rates.setdefault(currency, {})[i] = rate
+
+    for tx in parsed["cash"]:
+        if tx["currency"] not in ("", base):
+            post(tx["currency"], tx["date"], tx["units"], tx["fx"], tx["amount"])
+    for row in parsed["executions"]:
+        if row["asset"] == "CASH":
+            post(row["symbol"].split(".")[0], row["book_date"], row["quantity"], row["price"] * row["fx"])
+            post(row["currency"], row["book_date"], row["proceeds"], row["fx"])
+            post(row["commission_currency"], row["book_date"], row["commission"])
+        elif row["currency"] not in ("", base):
+            post(row["currency"], row["book_date"], row["units"], row["fx"], row["net"])
+    out = np.zeros(n)
+    borrowed = []
+    floor = -cfg["reconcile"]["fx_borrow_share"] * max(values)
+    for currency in sorted(moves):
+        if currency == base:
+            rate = np.ones(n)
+        elif currency in rates:
+            known = sorted(rates[currency].items())
+            rate = np.interp(np.arange(n), [i for i, _ in known], [value for _, value in known])
+        else:
+            continue
+        balance = np.cumsum(moves[currency])
+        step = np.diff(balance) * rate[1:] - np.asarray(booked[currency])[1:]
+        if currency == base or float((balance * rate).min()) >= floor:
+            step = step + balance[:-1] * np.diff(rate)
+        else:
+            borrowed.append(currency)
+        out[1:] += step
+    return out.tolist(), borrowed
+
+
+def _place_flows(parsed, dates, cash, fx, cfg):
     n = len(dates)
     flows = [0.0] * n
     records = []
@@ -38,9 +85,9 @@ def _place_flows(parsed, dates, cash, cfg):
             flows[i] += amount
         return flows, other_cash, 0, 0
     executed = [0.0] * n
-    for row in parsed.get("executions", []):
+    for row in parsed["executions"]:
         i = bisect.bisect_left(dates, row["book_date"])
-        if 0 < i < n:
+        if 0 < i < n and row["asset"] != "CASH":
             executed[i] += row["net"]
     tolerance = cfg["reconcile"]["flow_match_tolerance"]
     window = cfg["reconcile"]["flow_match_days"]
@@ -58,7 +105,7 @@ def _place_flows(parsed, dates, cash, cfg):
             pending.remove(item)
         if not pending:
             continue
-        gap_today = cash[t] - cash[t - 1] - executed[t] - other[t]
+        gap_today = cash[t] - cash[t - 1] - executed[t] - other[t] - fx[t]
         sizes = range(1, len(pending) + 1) if len(pending) <= 10 else (1, len(pending))
         best = None
         for size in sizes:
@@ -87,12 +134,14 @@ def account_series(parsed, cfg):
     dates = [day for day, _ in rows]
     values = [row["total"] for _, row in rows]
     cash = [row["cash"] for _, row in rows]
-    flows, other_cash, moved, unmatched = _place_flows(parsed, dates, cash, cfg)
+    fx, fx_borrowed = _fx_pnl(parsed, dates, values, cfg) if dates else ([], [])
+    flows, other_cash, moved, unmatched = _place_flows(parsed, dates, cash, fx, cfg)
     returns = [0.0] * len(dates)
     zero_base = 0
     for t in range(1, len(dates)):
-        if values[t - 1] > 0:
-            returns[t] = (values[t] - flows[t]) / values[t - 1] - 1.0
+        start = values[t - 1] + max(flows[t], 0.0)
+        if start > 0:
+            returns[t] = (values[t] - min(flows[t], 0.0) - fx[t]) / start - 1.0
         else:
             zero_base += 1
     index = np.cumprod(1.0 + np.asarray(returns)) if dates else np.asarray([])
@@ -101,6 +150,8 @@ def account_series(parsed, cfg):
         "values": values,
         "cash": cash,
         "flows": flows,
+        "fx": fx,
+        "fx_borrowed": fx_borrowed,
         "returns": returns,
         "index": index,
         "other_cash": other_cash,
@@ -114,8 +165,9 @@ def _episode(s, peak, trough, end, recovered):
     index = s["index"]
     values = s["values"]
     flows = s["flows"]
+    fx = s["fx"]
     depth = max(0.0, 1.0 - index[trough] / index[peak])
-    amount = -sum(values[t] - values[t - 1] - flows[t] for t in range(peak + 1, trough + 1))
+    amount = -sum(values[t] - values[t - 1] - flows[t] - fx[t] for t in range(peak + 1, trough + 1))
     deposits = sum(f for f in flows[peak + 1:end + 1] if f > 0)
     return {
         "peak": peak,
@@ -524,15 +576,17 @@ def expectancy(eligible, cfg):
 def reconcile(parsed, s, cfg):
     dates = s["dates"]
     values = s["values"]
-    executed = sum(row["net"] for row in parsed["executions"] if dates[0] < row["book_date"] <= dates[-1])
-    flows = sum(s["flows"])
+    executed = sum(
+        row["net"] for row in parsed["executions"]
+        if dates[0] < row["book_date"] <= dates[-1] and row["asset"] != "CASH")
+    explained = sum(s["flows"]) + s["other_cash"] + executed + sum(s["fx"])
     if s["cash"][0] is not None and s["cash"][-1] is not None:
         basis = "cash"
-        residual = s["cash"][-1] - s["cash"][0] - flows - s["other_cash"] - executed
+        residual = s["cash"][-1] - s["cash"][0] - explained
     else:
         basis = "nav"
         held = sum(pos["value"] for pos in parsed["open_positions"])
-        residual = values[-1] - values[0] - flows - s["other_cash"] - executed - held
+        residual = values[-1] - values[0] - explained - held
     relative = abs(residual) / max(abs(values[0]), abs(values[-1]), 1.0)
     return {
         "basis": basis,
@@ -558,7 +612,8 @@ def compute_facts(parsed, book, cfg):
     gross = sum(abs(t["pnl"]) for t in closed)
     option_gross = sum(abs(t["pnl"]) for t in closed if t["category"] in ("option", "weekly_option"))
     capital_in = values[0] + sum(s["flows"])
-    pnl = values[-1] - capital_in
+    fx_pnl = sum(s["fx"])
+    pnl = values[-1] - capital_in - fx_pnl
     rec = reconcile(parsed, s, cfg)
     quality = book["quality"]
     ineligible = len(closed) - len(eligible)
@@ -594,9 +649,20 @@ def compute_facts(parsed, book, cfg):
         notes.append("文件里有 %d 条公司行动记录，未计入交易统计。" % parsed["corporate_actions"])
     if s["zero_base_days"]:
         partial = True
-        notes.append("有 %d 天的前一日净值不大于零，当日收益记为 0。" % s["zero_base_days"])
-    if book["other_assets"]:
-        listing = "、".join("%s %d 笔" % (key, book["other_assets"][key]) for key in sorted(book["other_assets"]))
+        notes.append("有 %d 天的前一日净值加当日入金不大于零，当日收益记为 0。" % s["zero_base_days"])
+    base = parsed["base_currency"]
+    conversions = book["other_assets"].get("CASH", 0)
+    if conversions or fx_pnl:
+        notes.append("换汇成交 %d 笔，不算交易；换汇成本和外币现金的汇率盈亏合计 %.2f，不计入收益和盈亏。" % (conversions, fx_pnl))
+    if s["fx_borrowed"]:
+        notes.append("%s 的现金余额推算出负数（导出起点之前已有这个币种的现金，或借了这个币种），它的汇率盈亏没有剔除。" % "、".join(s["fx_borrowed"]))
+    priced = sorted({row["currency"] for row in parsed["executions"]
+                     if row["asset"] in ("STK", "OPT") and row["currency"] not in ("", base)})
+    if priced:
+        notes.append("有以 %s 计价的持仓，持仓市值里的汇率变动没有剔除。" % "、".join(priced))
+    others = {key: count for key, count in book["other_assets"].items() if key != "CASH"}
+    if others:
+        listing = "、".join("%s %d 笔" % (key, others[key]) for key in sorted(others))
         notes.append("其他资产只计入净值，不做逐笔统计：" + listing + "。")
     if quality["cash_like_trades"]:
         notes.append("现金类 ETF（%s）的 %d 笔买卖不计入交易统计，盈亏合计 %.2f。" % (
@@ -645,9 +711,10 @@ def compute_facts(parsed, book, cfg):
             "end_value": rnd(values[-1], 2),
             "net_deposits_after_start": rnd(sum(s["flows"]), 2),
             "capital_in": rnd(capital_in, 2),
+            "fx_pnl": rnd(fx_pnl, 2),
             "pnl": rnd(pnl, 2),
             "pnl_ratio": rnd(pnl / capital_in) if capital_in > 0 else None,
-            "gain_to_recover_capital": rnd(capital_in / values[-1] - 1.0) if pnl < 0 and values[-1] > 0 else 0.0,
+            "gain_to_recover_capital": rnd(capital_in / values[-1] - 1.0) if 0 < values[-1] < capital_in else 0.0,
             "twr_total": rnd(float(s["index"][-1]) - 1.0),
         },
         "drawdown": dict(block(ep), focus=cfg["drawdown_focus"]),

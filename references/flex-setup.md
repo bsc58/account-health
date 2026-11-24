@@ -10,7 +10,7 @@
 |---|---|---|
 | Account Information | 基础货币 | Account ID、Currency |
 | Net Asset Value (NAV) in Base，或 Equity Summary by Report Date in Base | 每日净值 | Report Date、Total、Cash |
-| Trades，明细级别选 Execution | 成交 | 全选最省事。至少要有：Asset Class、Symbol、Description、Conid、Underlying Symbol、Multiplier、Strike、Expiry、Put/Call、Trade ID、Order ID、Date/Time、Quantity、Trade Price、Proceeds、IB Commission、Net Cash、FX Rate To Base、Open/Close Indicator、Notes/Codes |
+| Trades，明细级别选 Execution | 成交 | 全选最省事。至少要有：Asset Class、Symbol、Description、Conid、Underlying Symbol、Multiplier、Strike、Expiry、Put/Call、Trade ID、Order ID、Date/Time、Quantity、Trade Price、Proceeds、IB Commission、IB Commission Currency、Net Cash、FX Rate To Base、Open/Close Indicator、Notes/Codes |
 | Option Exercises, Assignments and Expirations | 到期、行权、指派 | 全选 |
 | Cash Transactions | 出入金、股息、利息、费用 | 全选，类型全勾。有外币时要有 FX Rate To Base |
 | Corporate Actions | 换代码、合并 | 全选。有记录时脚本在数据质量里提示 |
@@ -32,7 +32,7 @@
 | `FlexStatement` | `accountId`、`fromDate`、`toDate` |
 | `AccountInformation` | `currency`（没有这部分时取净值行的 `currency`） |
 | `EquitySummaryByReportDateInBase` | `reportDate`、`total`、`cash` |
-| `Trade` | `assetCategory`、`symbol`、`description`、`conid`、`underlyingSymbol`、`multiplier`、`strike`、`expiry`、`putCall`、`tradeID`、`dateTime`、`reportDate`、`tradeDate`、`currency`、`quantity`、`tradePrice`、`proceeds`、`ibCommission`、`netCash`、`fxRateToBase`、`openCloseIndicator`、`notes` |
+| `Trade` | `assetCategory`、`symbol`、`description`、`conid`、`underlyingSymbol`、`multiplier`、`strike`、`expiry`、`putCall`、`tradeID`、`dateTime`、`reportDate`、`tradeDate`、`currency`、`quantity`、`tradePrice`、`proceeds`、`ibCommission`、`ibCommissionCurrency`、`netCash`、`fxRateToBase`、`openCloseIndicator`、`notes` |
 | `OptionEAE` | `conid`（没有则用 `symbol` 对应到成交里的合约）、`date`、`transactionType`、`quantity` |
 | `CashTransaction` | `type`、`amount`、`currency`、`dateTime`、`fxRateToBase`、`reportDate`、`transactionID`（后三个可以没有） |
 | `OpenPosition` | `conid`（没有则用 `symbol`）、`symbol`、`assetCategory`、`position`、`positionValue`、`costBasisMoney`、`fifoPnlUnrealized`、`fxRateToBase` |

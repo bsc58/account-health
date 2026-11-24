@@ -52,6 +52,7 @@ FACT_ROWS = (
     ("capital.net_deposits_after_start", "期间净入金", "m"),
     ("capital.capital_in", "累计投入", "m"),
     ("capital.end_value", "期末净值", "m"),
+    ("capital.fx_pnl", "汇率盈亏和换汇成本（不计入收益和盈亏）", "m"),
     ("capital.pnl", "绝对盈亏", "m"),
     ("capital.pnl_ratio", "绝对盈亏占累计投入", "p"),
     ("capital.gain_to_recover_capital", "回到累计投入需上涨", "p"),
@@ -189,21 +190,13 @@ def fmt(value, kind):
     return str(value)
 
 
-def fact_value(facts, path):
-    for level in ("0.0", "0.5", "1.0"):
-        prefix = "lowvol.p_by_sharpe."
-        if path == prefix + level:
-            return facts["lowvol"]["p_by_sharpe"].get(level)
-    return rules.lookup(facts, path)
-
-
 def facts_markdown(facts):
     lines = ["# 账户指标（只有数值，没有结论）", ""]
     for path, label, kind in FACT_ROWS:
         if label is None:
             lines += ["", "## " + path, "", "| 指标 | 数值 |", "|---|---|"]
         else:
-            lines.append("| %s | %s |" % (label, fmt(fact_value(facts, path), kind)))
+            lines.append("| %s | %s |" % (label, fmt(rules.lookup(facts, path), kind)))
     lines += ["", "## 亏损最大的交易", "", "| 编号 | 标的 | 类别 | 平仓方式 | 仓位 | 盈亏 | 超配倍数 |", "|---|---|---|---|---|---|---|"]
     for t in facts["attribution"]["top_losses"]:
         lines.append("| %s | %s | %s | %s | %s | %s | %s |" % (
@@ -234,8 +227,6 @@ def cmd_facts(args):
     except (ValueError, OSError) as error:
         fail(str(error))
     os.makedirs(args.out, exist_ok=True)
-    meta_path = os.path.join(args.out, "run_meta.json")
-    runs = load(meta_path)["runs"] + 1 if os.path.exists(meta_path) else 1
     for name in STALE:
         path = os.path.join(args.out, name)
         if os.path.exists(path):
@@ -244,8 +235,7 @@ def cmd_facts(args):
     dump(os.path.join(args.out, "trades.json"), rows)
     with open(os.path.join(args.out, "facts.md"), "w", encoding="utf-8") as handle:
         handle.write(facts_markdown(facts))
-    dump(meta_path, {
-        "runs": runs,
+    dump(os.path.join(args.out, "run_meta.json"), {
         "python": platform.python_version(),
         "numpy": np.__version__,
         "config_sha256": sha256(args.config),
@@ -256,6 +246,8 @@ def cmd_facts(args):
 
 
 def cmd_verdict(args):
+    if os.path.exists(os.path.join(args.out, "verdict.json")):
+        fail("拒绝运行：verdict.json 已存在，模型判断不能在比对之后改。要重来就从 facts 重跑。")
     cfg = load(args.config)
     facts = load(os.path.join(args.out, "facts.json"))
     path = os.path.join(args.out, "model_judgment.json")
@@ -291,11 +283,10 @@ def gather(args):
     verdict = load(verdict_path)
     judgment_path = os.path.join(out, "model_judgment.json")
     if sha256(judgment_path) != verdict["judgment_sha256"]:
-        fail("model_judgment.json 在 verdict 之后被改过。重新运行 verdict。")
+        fail("model_judgment.json 在 verdict 之后被改过。改回原样，或从 facts 重跑。")
     judgment = load(judgment_path)
     deviations = load(os.path.join(out, "diff.json"))["deviations"]
     adj = None
-    exhausted = False
     if deviations:
         adj_path = os.path.join(out, "adjudication.json")
         if not os.path.exists(adj_path):
@@ -308,14 +299,7 @@ def gather(args):
         errors = rules.validate_adjudication(adj, deviations, facts, ids)
         if errors:
             fail("adjudication.json 被退回。\n- " + "\n- ".join(errors))
-        items = {item["field"]: item for item in adj["items"] if isinstance(item, dict)}
-        if any(items[dev["field"]]["category"] == "DATA_ERROR" for dev in deviations):
-            reruns = load(os.path.join(out, "run_meta.json"))["runs"] - 1
-            if reruns < cfg["adjudication"]["max_reruns"]:
-                fail("裁决里有 DATA_ERROR。修正数据后从 facts 重跑（已重跑 %d 次，上限 %d 次）。"
-                     % (reruns, cfg["adjudication"]["max_reruns"]), 3)
-            exhausted = True
-    final = rules.finalize(verdict, judgment, deviations, adj, exhausted)
+    final = rules.finalize(verdict, judgment, deviations, adj)
     return cfg, facts, verdict, judgment, deviations, adj, final
 
 
@@ -345,7 +329,9 @@ def show(field, value):
 def report_markdown(facts, verdict, final, analysis, trimmed=None):
     period = facts["period"]
     title = rules.ZH[final["overall"]] + ("（证据不足）" if final["evidence_insufficient"] else "")
-    if final["has_deviation"]:
+    if final["data_disputed"]:
+        title += "（模型指出数据有误，结论待核实，见对照表）"
+    elif final["has_deviation"]:
         title += "（模型判断与计算结论有偏差，见对照表）"
     lines = [
         "# 账户健康度：" + title,
@@ -385,7 +371,7 @@ def report_markdown(facts, verdict, final, analysis, trimmed=None):
             lines.append("- 相对波动率和实际伤害按每日净值算，成交记录里没有这些仓位每天的市值，去掉交易后不能重算。")
             lines += ["", "| 指标 | 全部交易 | 去掉后 |", "|---|---|---|"]
             for path, label, kind in EX_ROWS:
-                lines.append("| %s | %s | %s |" % (label, fmt(fact_value(facts, path), kind), fmt(fact_value(block, path), kind)))
+                lines.append("| %s | %s | %s |" % (label, fmt(rules.lookup(facts, path), kind), fmt(rules.lookup(block, path), kind)))
     elif verdict["c4_source"].get("second_step"):
         level = rules.level_text(scan["level"])
         lines += ["", "## 第二步（可选）：去掉异常交易重算", "",

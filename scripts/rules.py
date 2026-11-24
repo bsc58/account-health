@@ -31,6 +31,24 @@ ENUMS = {
 }
 CATEGORIES = ("DATA_ERROR", "RULE_NOT_APPLICABLE", "MODEL_ERROR", "UNRESOLVED")
 C5_COLOR = {"positive": "green", "unproven": "yellow", "negative": "red"}
+UNRELIABLE = {
+    "data_quality.status": "PARTIAL",
+    "data_quality.reconcile.ok": False,
+    "account.sigma_source": "full_record",
+    "lowvol.reference_source": "full_record",
+    "lowvol.reference_sufficient": False,
+    "lowvol.methods_disagree": True,
+    "trade_drawdown.reference_source": "full_record",
+    "trade_drawdown.methods_disagree": True,
+}
+RULE_INPUTS = {
+    "C1": ("account.",),
+    "C2": ("account.", "lowvol.", "trade_drawdown."),
+    "C3": (),
+    "C4": (),
+    "C5": (),
+    "OVERALL": ("account.", "lowvol.", "trade_drawdown."),
+}
 
 
 def pct(value):
@@ -355,14 +373,36 @@ def compare(verdict, judgment):
 
 def lookup(obj, path):
     cur = obj
-    for part in path.split("."):
-        if isinstance(cur, dict) and part in cur:
-            cur = cur[part]
-        elif isinstance(cur, list) and part.isdigit() and int(part) < len(cur):
-            cur = cur[int(part)]
+    parts = path.split(".")
+    i = 0
+    while i < len(parts):
+        if isinstance(cur, dict):
+            for j in range(len(parts), i, -1):
+                key = ".".join(parts[i:j])
+                if key in cur:
+                    cur = cur[key]
+                    i = j
+                    break
+            else:
+                return None
+        elif isinstance(cur, list) and parts[i].isdigit() and int(parts[i]) < len(cur):
+            cur = cur[int(parts[i])]
+            i += 1
         else:
             return None
     return cur
+
+
+def _flag_on(facts, path):
+    value = lookup(facts, path)
+    expected = UNRELIABLE[path]
+    if isinstance(expected, bool):
+        return value is expected
+    return value == expected
+
+
+def _flag_paths(rule):
+    return [path for path in UNRELIABLE if path.startswith("data_quality.") or path.startswith(RULE_INPUTS[rule])]
 
 
 def validate_adjudication(adj, deviations, facts, trade_ids):
@@ -394,12 +434,14 @@ def validate_adjudication(adj, deviations, facts, trade_ids):
             if evidence.get("rule") != dev["rule"]:
                 errors.append("%s：RULE_NOT_APPLICABLE 的 evidence.rule 必须是 %s" % (dev["field"], dev["rule"]))
             path = evidence.get("facts_path")
-            if not isinstance(path, str) or lookup(facts, path) is None:
-                errors.append("%s：RULE_NOT_APPLICABLE 的 evidence.facts_path 必须指向 facts.json 里存在的字段" % dev["field"])
+            allowed = _flag_paths(dev["rule"])
+            if path not in allowed or not _flag_on(facts, path):
+                errors.append("%s：RULE_NOT_APPLICABLE 的 evidence.facts_path 必须是下面某个已经亮起的标志（当前都没亮就不能用这一类）：%s" % (
+                    dev["field"], "、".join("%s=%s" % (p, lookup(facts, p)) for p in allowed)))
     return errors
 
 
-def finalize(verdict, judgment, deviations, adj, reruns_exhausted):
+def finalize(verdict, judgment, deviations, adj):
     items = {}
     if adj:
         items = {item.get("field"): item for item in adj.get("items", []) if isinstance(item, dict)}
@@ -429,7 +471,9 @@ def finalize(verdict, judgment, deviations, adj, reruns_exhausted):
             elif category == "UNRESOLVED":
                 row["mark"] = "存在偏差，以计算结论为准，两个结论并列"
             else:
-                row["mark"] = "数据存疑，重跑次数已用完，以计算结论为准" if reruns_exhausted else "数据有误，需修正后重跑"
+                evidence = items[field]["evidence"]
+                row["mark"] = "模型指出数据有误：%s 的 %s 应为 %s；以计算结论为准，待核实" % (
+                    evidence["record"], evidence["field"], evidence["value"])
         fields[field] = row
     if fields["overall"]["category"] == "RULE_NOT_APPLICABLE":
         overall, insufficient = "undetermined", True
@@ -445,6 +489,7 @@ def finalize(verdict, judgment, deviations, adj, reruns_exhausted):
         "overall": overall,
         "evidence_insufficient": insufficient,
         "has_deviation": bool(deviations),
+        "data_disputed": any(row["category"] == "DATA_ERROR" for row in fields.values()),
     }
 
 

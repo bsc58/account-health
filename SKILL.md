@@ -71,14 +71,20 @@ python3 SKILL/scripts/health.py facts 文件1.xml [文件2.xml ...] --out RUN
 python3 SKILL/scripts/health.py verdict --out RUN
 ```
 
-`model_judgment.json` 不存在或格式不对时脚本拒绝运行。成功后得到 `RUN/verdict.json` 和 `RUN/diff.json`。
+`model_judgment.json` 不存在或格式不对时脚本拒绝运行。成功后得到 `RUN/verdict.json` 和 `RUN/diff.json`。每次 facts 之后 verdict 只能跑一次；跑过之后不能再改 `model_judgment.json`，要重来就从第 1 步重跑。
 
 ### 4. 裁决偏差
 
 `diff.json` 的 `count` 为 0 时跳过这一步。否则对 `deviations` 里的每一项，按下面的顺序检查，停在第一个成立的类别：
 
 1. **`DATA_ERROR`**：你能指出 `trades.json` 里某笔交易或某个日期的净值有解析或数据错误。证据写交易编号或 8 位日期、字段名、你认为正确的值。
-2. **`RULE_NOT_APPLICABLE`**：`facts.json` 里有某个字段证明这条规则的输入不可靠。例如 `data_quality.status` 是 `PARTIAL` 且影响这一项、`lowvol.methods_disagree` 或 `trade_drawdown.methods_disagree` 为真、`account.sigma_source` 是 `full_record`。证据写规则编号和字段路径。
+2. **`RULE_NOT_APPLICABLE`**：`facts.json` 里有脚本立起的“输入不可靠”标志已经亮起，且和这条规则有关。只认下面这些字段，字段的当前值必须等于括号里的值才算：
+   - 任何规则都可用：`data_quality.status`（`"PARTIAL"`）、`data_quality.reconcile.ok`（`false`）。
+   - `C1`、`C2`、`OVERALL` 可用：`account.sigma_source`（`"full_record"`）。
+   - `C2`、`OVERALL` 可用：`lowvol.reference_source`（`"full_record"`）、`lowvol.reference_sufficient`（`false`）、`lowvol.methods_disagree`（`true`）、`trade_drawdown.reference_source`（`"full_record"`）、`trade_drawdown.methods_disagree`（`true`）。
+   - `C3`、`C4`、`C5` 只能用前两个。
+
+   这些标志都没亮时不能选这一类。证据写规则编号和字段路径。
 3. **`MODEL_ERROR`**：你读错了数字、推理有误，或者只是分界线和规则不同。
 4. **`UNRESOLVED`**：以上都不是，你仍然不同意，但给不出可验证的原因。
 
@@ -110,7 +116,7 @@ python3 SKILL/scripts/health.py verdict --out RUN
 
 | 类别 | 最终结论 |
 |---|---|
-| `DATA_ERROR` | 脚本要求修正数据后从第 1 步重跑，最多两次 |
+| `DATA_ERROR` | 以计算结论为准，报告标题和对照表写明模型指出的那条记录。把这条记录告诉用户，请他对照账户核实，拿到更正后的导出文件再从第 1 步重跑 |
 | `RULE_NOT_APPLICABLE` | 该项记为“无法判断”，两个结论并列 |
 | `MODEL_ERROR` | 以计算结论为准 |
 | `UNRESOLVED` | 以计算结论为准，标注存在偏差，两个结论并列 |
